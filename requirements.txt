@@ -1,0 +1,18 @@
+# ==============================================================================
+# RT FINANCE API — ETL Pipeline Dependencies
+# ==============================================================================
+# Install with:  pip install -r requirements.txt
+
+# HTTP requests (Alpha Vantage API)
+requests>=2.31.0
+
+# Data manipulation and analysis
+pandas>=2.0.0
+numpy>=1.26.0
+
+# Environment variable management (.env file support)
+python-dotenv>=1.0.0
+
+# Supabase / PostgreSQL connectivity via SQLAlchemy
+sqlalchemy>=2.0.0
+psycopg2-binary>=2.9.0

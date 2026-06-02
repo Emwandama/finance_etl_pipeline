@@ -1,0 +1,32 @@
+# ==============================================================================
+# RT FINANCE API — Git Ignore
+# ==============================================================================
+
+# Environment variables — NEVER commit real credentials
+.env
+
+# Pipeline outputs (regenerated on each run)
+output/
+logs/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE settings
+.vscode/
+.idea/
+
+# Jupyter notebooks (submission is .py only)
+*.ipynb
+.ipynb_checkpoints/
