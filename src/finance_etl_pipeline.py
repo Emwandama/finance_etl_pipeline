@@ -58,7 +58,7 @@ try:
     from dotenv import load_dotenv
     from sqlalchemy import (
         create_engine, text, MetaData, Table, Column,
-        Date, Numeric, BigInteger, String, DateTime,
+        Date, Numeric, BigInteger, String, DateTime, UniqueConstraint,
     )
     from sqlalchemy.dialects.postgresql import insert as pg_insert
     from sqlalchemy.exc import SQLAlchemyError
@@ -513,16 +513,19 @@ def validate(df: pd.DataFrame) -> pd.DataFrame:
 # ==============================================================================
 # 5.  DATABASE LOADING — Supabase (PostgreSQL) via SQLAlchemy
 # ==============================================================================
-# Supabase uses standard PostgreSQL, so SQLAlchemy + psycopg2 connects to it
-# exactly like any hosted Postgres instance.  No Supabase-specific SDK needed.
+# Schema: 4 related tables matching the schema visualizer diagram
 #
-# Incremental strategy: INSERT … ON CONFLICT DO UPDATE (upsert).
-# Primary key is (timestamp, symbol) — re-running the pipeline never creates
-# duplicates; existing rows are refreshed with the latest computed values.
+#   symbols             — master ref   (one row per ticker)
+#   api_ingestion_runs  — audit log    (one row per pipeline run)
+#   daily_prices        — fact table   (raw OHLCV, one row per symbol+date)
+#   daily_price_metrics — derived      (computed metrics, one row per symbol+date)
+#
+# Incremental strategy: INSERT … ON CONFLICT DO UPDATE (upsert) on
+# (symbol_id, trade_date) for daily_prices and daily_price_metrics.
+# Re-running the pipeline never creates duplicate rows.
 # ==============================================================================
 
 SCHEMA_NAME = "public"
-TABLE_NAME  = "stock_daily"
 
 
 def get_engine(database_url: str):
@@ -543,7 +546,6 @@ def get_engine(database_url: str):
             "Add your Supabase connection parameters and re-run the pipeline."
         )
 
-    # Create engine — sslmode=require is already part of the DATABASE_URL string
     engine = create_engine(database_url, echo=False, pool_pre_ping=True)
 
     try:
@@ -557,93 +559,245 @@ def get_engine(database_url: str):
         ) from exc
 
 
-def ensure_table(engine, metadata: MetaData) -> Table:
+def ensure_tables(engine, metadata: MetaData) -> dict:
     """
-    Declare the stock_daily schema and create the table if it does not exist.
+    Declare all four tables and create them in Supabase if they do not exist.
 
-    Columns mirror the transformed DataFrame exactly.  The composite primary
-    key (timestamp, symbol) is what drives the incremental upsert logic.
+    Returns a dict of {table_name: Table} for use in the load functions.
+    Tables are created in dependency order:
+      symbols → api_ingestion_runs → daily_prices → daily_price_metrics
     """
-    table = Table(
-        TABLE_NAME,
-        metadata,
-        Column("timestamp",     Date,       primary_key=True),
-        Column("symbol",        String(10), primary_key=True),
-        Column("open",          Numeric(12, 4)),
-        Column("high",          Numeric(12, 4)),
-        Column("low",           Numeric(12, 4)),
-        Column("close",         Numeric(12, 4)),
-        Column("volume",        BigInteger),
-        Column("daily_return",  Numeric(10, 4)),
-        Column("price_range",   Numeric(12, 4)),
-        Column("vwap_proxy",    Numeric(12, 4)),
-        Column("ma_7",          Numeric(12, 4)),
-        Column("ma_20",         Numeric(12, 4)),
-        Column("volatility_7",  Numeric(10, 4)),
-        Column("volume_zscore", Numeric(10, 4)),
-        Column("loaded_at",     DateTime),
+    # ── Table 1: symbols (master ref) ────────────────────────────────────────
+    symbols = Table(
+        "symbols", metadata,
+        Column("symbol_id",    BigInteger, primary_key=True, autoincrement=True),
+        Column("ticker",       String(10), nullable=False, unique=True),
+        Column("company_name", String(255)),
+        Column("exchange",     String(50)),
+        Column("currency",     String(3)),
+        Column("created_at",   DateTime),
         schema=SCHEMA_NAME,
         extend_existing=True,
     )
+
+    # ── Table 2: api_ingestion_runs (audit) ───────────────────────────────────
+    ingestion_runs = Table(
+        "api_ingestion_runs", metadata,
+        Column("run_id",           BigInteger, primary_key=True, autoincrement=True),
+        Column("symbol_id",        BigInteger, nullable=False),
+        Column("fetched_at",       DateTime),
+        Column("records_inserted", BigInteger),
+        Column("source_url",       String(500)),
+        Column("status",           String(20)),
+        Column("notes",            String(1000)),
+        schema=SCHEMA_NAME,
+        extend_existing=True,
+    )
+
+    # ── Table 3: daily_prices (fact table) ───────────────────────────────────
+    daily_prices = Table(
+        "daily_prices", metadata,
+        Column("price_id",   BigInteger, primary_key=True, autoincrement=True),
+        Column("symbol_id",  BigInteger, nullable=False),
+        Column("run_id",     BigInteger, nullable=False),
+        Column("trade_date", Date,       nullable=False),
+        Column("open_price", Numeric(12, 4)),
+        Column("high_price", Numeric(12, 4)),
+        Column("low_price",  Numeric(12, 4)),
+        Column("close_price",Numeric(12, 4)),
+        Column("volume",     BigInteger),
+        Column("ingested_at",DateTime),
+        UniqueConstraint("symbol_id", "trade_date", name="uq_daily_prices_symbol_date"),
+        schema=SCHEMA_NAME,
+        extend_existing=True,
+    )
+
+    # ── Table 4: daily_price_metrics (derived) ────────────────────────────────
+    daily_price_metrics = Table(
+        "daily_price_metrics", metadata,
+        Column("metric_id",        BigInteger, primary_key=True, autoincrement=True),
+        Column("symbol_id",        BigInteger, nullable=False),
+        Column("trade_date",       Date,       nullable=False),
+        Column("daily_return_pct", Numeric(8,  4)),
+        Column("price_range",      Numeric(12, 4)),
+        Column("range_pct",        Numeric(8,  4)),
+        Column("vwap_approx",      Numeric(12, 4)),
+        Column("ma_7",             Numeric(12, 4)),
+        Column("sma_20d",          Numeric(12, 4)),
+        Column("volatility_7",     Numeric(10, 4)),
+        Column("volume_zscore",    Numeric(10, 4)),
+        Column("computed_at",      DateTime),
+        UniqueConstraint("symbol_id", "trade_date", name="uq_daily_price_metrics_symbol_date"),
+        schema=SCHEMA_NAME,
+        extend_existing=True,
+    )
+
     metadata.create_all(engine)
-    logger.info("DB | Table '%s.%s' is ready", SCHEMA_NAME, TABLE_NAME)
-    return table
+    logger.info("DB | All 4 tables ready: symbols, api_ingestion_runs, daily_prices, daily_price_metrics")
+
+    return {
+        "symbols":             symbols,
+        "api_ingestion_runs":  ingestion_runs,
+        "daily_prices":        daily_prices,
+        "daily_price_metrics": daily_price_metrics,
+    }
 
 
-def load_to_db(df: pd.DataFrame, engine, table: Table) -> int:
+def upsert_symbol(engine, tables: dict, symbol: str) -> int:
     """
-    Incrementally upsert the validated DataFrame into Supabase.
-
-    Strategy
-    --------
-    Uses PostgreSQL's INSERT … ON CONFLICT DO UPDATE so that:
-    - New dates are inserted.
-    - Existing dates are updated (e.g. if the pipeline is re-run with
-      corrected data or a new derived metric is added).
-    - No duplicates are ever created.
-
-    Rows are sent in batches of 500 to stay within Supabase's request limits.
-
-    Returns the total number of rows upserted.
+    Insert the ticker into the symbols table if it does not already exist.
+    Returns the symbol_id for use in downstream inserts.
     """
-    logger.info("=" * 60)
-    logger.info("STAGE 5 — DATABASE LOADING (Supabase — Incremental Upsert)")
-    logger.info("=" * 60)
-
-    db_cols = [
-        "timestamp", "symbol", "open", "high", "low", "close", "volume",
-        "daily_return", "price_range", "vwap_proxy",
-        "ma_7", "ma_20", "volatility_7", "volume_zscore",
-    ]
-
-    load_df = df[db_cols].copy()
-    load_df["timestamp"] = load_df["timestamp"].dt.date   # Python date for SQL DATE
-    load_df["loaded_at"] = datetime.now()
-
-    # Replace pandas NA / NaN with Python None for SQL NULL compatibility
-    load_df = load_df.where(pd.notnull(load_df), other=None)
-
-    records     = load_df.to_dict(orient="records")
-    update_cols = [c for c in db_cols if c not in ("timestamp", "symbol")]
-    upserted    = 0
-    batch_size  = 500
+    sym_table = tables["symbols"]
 
     with engine.begin() as conn:
-        for start in range(0, len(records), batch_size):
-            batch = records[start: start + batch_size]
-            stmt  = pg_insert(table).values(batch)
+        # Try to insert; if ticker already exists, do nothing and return existing id
+        stmt = pg_insert(sym_table).values(
+            ticker    = symbol.upper(),
+            created_at= datetime.now(),
+        ).on_conflict_do_nothing(index_elements=["ticker"])
+        conn.execute(stmt)
+
+        # Fetch the symbol_id (whether just inserted or pre-existing)
+        row = conn.execute(
+            text("SELECT symbol_id FROM public.symbols WHERE ticker = :t"),
+            {"t": symbol.upper()}
+        ).fetchone()
+
+    symbol_id = row[0]
+    logger.info("DB | symbols — symbol_id=%d for ticker=%s", symbol_id, symbol.upper())
+    return symbol_id
+
+
+def log_ingestion_run(engine, tables: dict, symbol_id: int,
+                      source_url: str, status: str,
+                      records_inserted: int = 0, notes: str = "") -> int:
+    """
+    Insert one row into api_ingestion_runs to audit this pipeline execution.
+    Returns the run_id for linking daily_prices rows.
+    """
+    run_table = tables["api_ingestion_runs"]
+
+    with engine.begin() as conn:
+        result = conn.execute(
+            pg_insert(run_table).values(
+                symbol_id        = symbol_id,
+                fetched_at       = datetime.now(),
+                records_inserted = records_inserted,
+                source_url       = source_url,
+                status           = status,
+                notes            = notes or None,
+            ).returning(run_table.c.run_id)
+        )
+        run_id = result.fetchone()[0]
+
+    logger.info("DB | api_ingestion_runs — run_id=%d  status=%s", run_id, status)
+    return run_id
+
+
+def load_daily_prices(df: pd.DataFrame, engine, tables: dict,
+                      symbol_id: int, run_id: int) -> int:
+    """
+    Upsert raw OHLCV data into daily_prices.
+
+    Conflict target: (symbol_id, trade_date)
+    On conflict: update price columns and ingested_at timestamp.
+    """
+    tbl = tables["daily_prices"]
+
+    records = [
+        {
+            "symbol_id":  symbol_id,
+            "run_id":     run_id,
+            "trade_date": row["timestamp"].date(),
+            "open_price": row["open"],
+            "high_price": row["high"],
+            "low_price":  row["low"],
+            "close_price":row["close"],
+            "volume":     int(row["volume"]) if pd.notnull(row["volume"]) else None,
+            "ingested_at":datetime.now(),
+        }
+        for _, row in df.iterrows()
+    ]
+
+    upserted = 0
+    with engine.begin() as conn:
+        for start in range(0, len(records), 500):
+            batch = records[start: start + 500]
+            stmt  = pg_insert(tbl).values(batch)
             stmt  = stmt.on_conflict_do_update(
-                index_elements=["timestamp", "symbol"],
-                set_={col: stmt.excluded[col] for col in update_cols},
+                index_elements=["symbol_id", "trade_date"],
+                set_={
+                    "open_price":  stmt.excluded.open_price,
+                    "high_price":  stmt.excluded.high_price,
+                    "low_price":   stmt.excluded.low_price,
+                    "close_price": stmt.excluded.close_price,
+                    "volume":      stmt.excluded.volume,
+                    "ingested_at": stmt.excluded.ingested_at,
+                },
             )
             conn.execute(stmt)
             upserted += len(batch)
-            logger.info(
-                "DB | Upserted rows %d–%d (%d rows in batch)",
-                start + 1, start + len(batch), len(batch),
-            )
+            logger.info("DB | daily_prices upserted rows %d–%d", start + 1, start + len(batch))
 
-    logger.info("DB | Total rows upserted into Supabase: %d", upserted)
+    logger.info("DB | daily_prices — total rows upserted: %d", upserted)
+    return upserted
+
+
+def load_daily_metrics(df: pd.DataFrame, engine, tables: dict, symbol_id: int) -> int:
+    """
+    Upsert derived financial metrics into daily_price_metrics.
+
+    Conflict target: (symbol_id, trade_date)
+    On conflict: update all metric columns and computed_at timestamp.
+    """
+    tbl = tables["daily_price_metrics"]
+
+    def _safe(val):
+        return None if pd.isnull(val) else float(val)
+
+    records = [
+        {
+            "symbol_id":       symbol_id,
+            "trade_date":      row["timestamp"].date(),
+            "daily_return_pct":_safe(row["daily_return"]),
+            "price_range":     _safe(row["price_range"]),
+            "range_pct":       _safe(row["price_range"] / row["close"] * 100)
+                               if pd.notnull(row["close"]) and row["close"] != 0 else None,
+            "vwap_approx":     _safe(row["vwap_proxy"]),
+            "ma_7":            _safe(row["ma_7"]),
+            "sma_20d":         _safe(row["ma_20"]),
+            "volatility_7":    _safe(row["volatility_7"]),
+            "volume_zscore":   _safe(row["volume_zscore"]),
+            "computed_at":     datetime.now(),
+        }
+        for _, row in df.iterrows()
+    ]
+
+    upserted = 0
+    with engine.begin() as conn:
+        for start in range(0, len(records), 500):
+            batch = records[start: start + 500]
+            stmt  = pg_insert(tbl).values(batch)
+            stmt  = stmt.on_conflict_do_update(
+                index_elements=["symbol_id", "trade_date"],
+                set_={
+                    "daily_return_pct": stmt.excluded.daily_return_pct,
+                    "price_range":      stmt.excluded.price_range,
+                    "range_pct":        stmt.excluded.range_pct,
+                    "vwap_approx":      stmt.excluded.vwap_approx,
+                    "ma_7":             stmt.excluded.ma_7,
+                    "sma_20d":          stmt.excluded.sma_20d,
+                    "volatility_7":     stmt.excluded.volatility_7,
+                    "volume_zscore":    stmt.excluded.volume_zscore,
+                    "computed_at":      stmt.excluded.computed_at,
+                },
+            )
+            conn.execute(stmt)
+            upserted += len(batch)
+            logger.info("DB | daily_price_metrics upserted rows %d–%d", start + 1, start + len(batch))
+
+    logger.info("DB | daily_price_metrics — total rows upserted: %d", upserted)
     return upserted
 
 
@@ -655,12 +809,18 @@ def run_pipeline() -> None:
     """
     Execute all five ETL stages end-to-end.
 
-    All output is stored in Supabase — a valid DB connection is required.
-    The pipeline is idempotent: the upsert strategy in Stage 5 means it
-    can be re-run safely without creating duplicate rows.
-    DataQualityError in Stage 4 aborts the pipeline before any DB write.
+    Stage 5 loads data into 4 Supabase tables:
+      symbols, api_ingestion_runs, daily_prices, daily_price_metrics
+
+    The pipeline is idempotent — upserts on (symbol_id, trade_date) mean
+    re-runs never create duplicate rows. DataQualityError in Stage 4 aborts
+    before any DB write.
     """
     start_time = datetime.now()
+    source_url = (
+        f"https://www.alphavantage.co/query?function=TIME_SERIES_DAILY"
+        f"&symbol={SYMBOL}&outputsize=full"
+    )
 
     logger.info("=" * 60)
     logger.info("RT FINANCE API  —  ETL PIPELINE START")
@@ -677,23 +837,53 @@ def run_pipeline() -> None:
     # Stage 3 — Transform
     transformed_df = transform(clean_df, SYMBOL)
 
-    # Stage 4 — Validate  (aborts on hard failures before any DB write)
+    # Stage 4 — Validate (aborts on hard failures before any DB write)
     validated_df = validate(transformed_df)
 
-    # Stage 5 — Load to Supabase (required — raises if connection unavailable)
+    # Stage 5 — Load to Supabase
     engine   = get_engine(DATABASE_URL)
     metadata = MetaData()
-    table    = ensure_table(engine, metadata)
-    rows     = load_to_db(validated_df, engine, table)
+    tables   = ensure_tables(engine, metadata)
+
+    # 5a — Upsert ticker into symbols master table
+    symbol_id = upsert_symbol(engine, tables, SYMBOL)
+
+    # 5b — Log this ingestion run (initial entry; updated after load)
+    run_id = log_ingestion_run(
+        engine, tables, symbol_id,
+        source_url=source_url,
+        status="in_progress",
+    )
+
+    # 5c — Upsert raw OHLCV into daily_prices
+    price_rows = load_daily_prices(validated_df, engine, tables, symbol_id, run_id)
+
+    # 5d — Upsert derived metrics into daily_price_metrics
+    metric_rows = load_daily_metrics(validated_df, engine, tables, symbol_id)
+
+    # 5e — Update ingestion run record with final counts and success status
+    with engine.begin() as conn:
+        conn.execute(
+            text("""
+                UPDATE public.api_ingestion_runs
+                SET status = 'success', records_inserted = :n
+                WHERE run_id = :rid
+            """),
+            {"n": price_rows, "rid": run_id}
+        )
+    logger.info("DB | api_ingestion_runs updated — run_id=%d  status=success", run_id)
+
     engine.dispose()
 
     # Summary
     elapsed = (datetime.now() - start_time).total_seconds()
     logger.info("=" * 60)
     logger.info("PIPELINE COMPLETE")
-    logger.info("Rows upserted  : %d", rows)
+    logger.info("symbol_id      : %d", symbol_id)
+    logger.info("run_id         : %d", run_id)
+    logger.info("Prices upserted: %d", price_rows)
+    logger.info("Metrics upserted: %d", metric_rows)
     logger.info("Elapsed time   : %.2f seconds", elapsed)
-    logger.info("Supabase table : %s.%s", SCHEMA_NAME, TABLE_NAME)
     logger.info("Log file       : %s", log_file)
     logger.info("=" * 60)
 
