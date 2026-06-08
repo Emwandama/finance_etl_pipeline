@@ -127,25 +127,25 @@ app.index_string = """<!DOCTYPE html>
 .Select-placeholder{color:#94A3B8 !important}
 .Select--single>.Select-control .Select-value{color:#E2E8F0 !important}
 /* ── Date picker dark theme ── */
-.DateRangePickerInput{background:#0A2744 !important;border:1px solid #1E4976 !important;border-radius:8px !important;display:flex;align-items:center;padding:0 8px}
-.DateRangePickerInput:hover{border-color:#38BDF8 !important}
+.DateRangePickerInput{background:#3B0A0A !important;border:1px solid #7F1D1D !important;border-radius:8px !important;display:flex;align-items:center;padding:0 8px}
+.DateRangePickerInput:hover{border-color:#F87171 !important}
 .DateInput{background:transparent !important;width:100px}
 .DateInput_input{background:transparent !important;border:none !important;color:#E2E8F0 !important;font-size:13px !important;font-family:monospace !important;padding:6px 4px !important;text-align:center}
 .DateInput_input::placeholder{color:#94A3B8 !important}
 .DateRangePickerInput_arrow{color:#94A3B8;margin:0 4px}
 .DateRangePickerInput_arrow_svg{fill:#94A3B8}
-.DayPicker{background:#0D2137 !important;border:1px solid #1E4976 !important;border-radius:10px;box-shadow:0 8px 32px rgba(0,0,0,0.5)}
-.CalendarMonth{background:#0D2137 !important}
-.CalendarMonthGrid{background:#0D2137 !important}
-.DayPickerNavigation_button{border-color:#1E4976 !important;background:#0A2744 !important}
+.DayPicker{background:#2D0A0A !important;border:1px solid #7F1D1D !important;border-radius:10px;box-shadow:0 8px 32px rgba(0,0,0,0.5)}
+.CalendarMonth{background:#2D0A0A !important}
+.CalendarMonthGrid{background:#2D0A0A !important}
+.DayPickerNavigation_button{border-color:#7F1D1D !important;background:#3B0A0A !important}
 .DayPickerNavigation_svg__horizontal{fill:#94A3B8}
 .CalendarMonth_caption{color:#E2E8F0 !important}
 .DayPicker_weekHeader_li{color:#94A3B8}
-.CalendarDay__default{background:#0D2137 !important;color:#E2E8F0 !important;border-color:#1E4976 !important}
-.CalendarDay__default:hover{background:#0A2744 !important;color:#38BDF8 !important;border-color:#353A5E !important}
-.CalendarDay__selected,.CalendarDay__selected:hover{background:#38BDF8 !important;color:#0F1117 !important;border-color:#38BDF8 !important}
-.CalendarDay__selected_span{background:#1E3A5F !important;color:#E2E8F0 !important;border-color:#252A40 !important}
-.CalendarDay__hovered_span{background:#1E3A5F !important;color:#38BDF8 !important}
+.CalendarDay__default{background:#2D0A0A !important;color:#E2E8F0 !important;border-color:#7F1D1D !important}
+.CalendarDay__default:hover{background:#3B0A0A !important;color:#38BDF8 !important;border-color:#353A5E !important}
+.CalendarDay__selected,.CalendarDay__selected:hover{background:#F87171 !important;color:#0F1117 !important;border-color:#F87171 !important}
+.CalendarDay__selected_span{background:#7F1D1D !important;color:#E2E8F0 !important;border-color:#3B0A0A !important}
+.CalendarDay__hovered_span{background:#7F1D1D !important;color:#F87171 !important}
 /* ── Checkbox ── */
 .dash-checklist label{color:#E2E8F0 !important}
 </style>
